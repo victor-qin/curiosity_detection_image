@@ -1,0 +1,4 @@
+.env
+__pycache__/
+reachy_sessions.jsonl
+test_leaf.jpg
