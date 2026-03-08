@@ -43,6 +43,14 @@ class BaseAgent:
             "--http-port", type=int, default=None,
             help="HTTP fallback server port (optional)"
         )
+        parser.add_argument(
+            "--model", type=str, default="claude-sonnet-4-20250514",
+            help="Claude model for agent brain (default: claude-sonnet-4-20250514)"
+        )
+        parser.add_argument(
+            "--no-claude", action="store_true",
+            help="Disable Claude brain, use deterministic fallback only"
+        )
         self.add_args(parser)
         return parser.parse_args()
 
