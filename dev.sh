@@ -3,10 +3,11 @@
 # Start the full multi-agent stack for local development.
 #
 # Usage:
-#   ./dev.sh                  # Claude-powered agents + static test image
-#   ./dev.sh --no-claude      # Deterministic-only agents
-#   ./dev.sh --demo           # Use webcam instead of test image
+#   ./dev.sh                              # Claude-powered agents + static test image
+#   ./dev.sh --no-claude                  # Deterministic-only agents
+#   ./dev.sh --demo                       # Use webcam instead of test image
 #   ./dev.sh --demo --no-claude
+#   ./dev.sh --script=demos/example_demo.json  # Run a choreographed demo script
 #
 # Ctrl-C to stop all agents.
 
@@ -14,13 +15,15 @@ set -e
 cd "$(dirname "$0")"
 
 CLAUDE_FLAG=""
-SOURCE_FLAG="--image test_leaf.jpg"
+SOURCE_FLAG="--image test_sunflower.jpg"
+SCRIPT_FLAG=""
 
 for arg in "$@"; do
     case "$arg" in
         --no-claude) CLAUDE_FLAG="--no-claude" ;;
         --demo)      SOURCE_FLAG="--demo" ;;
         --image=*)   SOURCE_FLAG="--image ${arg#*=}" ;;
+        --script=*)  SCRIPT_FLAG="--demo-script ${arg#*=}" ;;
     esac
 done
 
@@ -37,6 +40,7 @@ trap cleanup EXIT INT TERM
 echo "=== Curiosity Detection — Multi-Agent Stack ==="
 echo "  Source: $SOURCE_FLAG"
 echo "  Claude: ${CLAUDE_FLAG:-enabled}"
+echo "  Script: ${SCRIPT_FLAG:-none}"
 echo ""
 
 # Start agents in background
@@ -52,6 +56,6 @@ echo ""
 echo "=== All agents running. Starting core loop... ==="
 echo ""
 
-# Core loop in foreground (always uses Claude for scene analysis)
-python core_loop.py $SOURCE_FLAG \
+# Core loop in foreground
+python core_loop.py $SOURCE_FLAG $SCRIPT_FLAG \
     --http-agents http://localhost:8001 http://localhost:8002 http://localhost:8003 http://localhost:8004

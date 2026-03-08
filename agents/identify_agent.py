@@ -1,17 +1,13 @@
 from __future__ import annotations
 
 """
-Narrate Agent — receives GOTO commands, calls Claude Vision with the
-frame in a creative mode (WONDER/STORY/CHALLENGE cycling), and speaks
-the response aloud via gTTS.
+Narrate Agent — receives GOTO commands, calls Claude with an image frame
+or demo context in a creative mode (WONDER/STORY/CHALLENGE cycling),
+and speaks the response aloud via the shared TTS helper.
 """
 
-import base64
 import os
-import subprocess
 import sys
-import tempfile
-import time
 from itertools import cycle
 from pathlib import Path
 
@@ -28,18 +24,13 @@ if _env_file.exists():
             os.environ.setdefault(k.strip(), v.strip().strip("'\""))
 
 from utils.base_agent import BaseAgent
+from utils.tts import speak as speak_tts
 
 try:
     from anthropic import Anthropic
     CLAUDE_AVAILABLE = True
 except ImportError:
     CLAUDE_AVAILABLE = False
-
-try:
-    from gtts import gTTS
-    VOICE_AVAILABLE = True
-except ImportError:
-    VOICE_AVAILABLE = False
 
 
 CREATIVE_MODES = cycle(["WONDER", "STORY", "CHALLENGE"])
@@ -116,7 +107,8 @@ class NarrateAgent(BaseAgent):
             self.claude = Anthropic(api_key=api_key)
             print(f"[{self.AGENT_NAME}] Claude ready (model: {self.args.model})")
 
-        if not VOICE_AVAILABLE:
+        from utils.tts import TTS_AVAILABLE
+        if not TTS_AVAILABLE:
             print(f"[{self.AGENT_NAME}] gTTS not available — text output only")
 
     def handle_goto(self, payload: dict):
@@ -127,7 +119,9 @@ class NarrateAgent(BaseAgent):
         print(f"[{self.AGENT_NAME}] Mode: {mode} | Object: {obj_name}")
 
         if self.claude and frame_b64:
-            narration = self._generate_narration(frame_b64, mode)
+            narration = self._generate_narration(frame_b64, mode, obj_name)
+        elif self.claude and self._current_demo_context:
+            narration = self._generate_narration(None, mode, obj_name)
         else:
             narration = f"I see {obj_name}! {payload.get('description', 'How interesting!')}"
 
@@ -141,14 +135,13 @@ class NarrateAgent(BaseAgent):
             "object": obj_name,
         })
 
-    def _generate_narration(self, frame_b64: str, mode: str) -> str:
-        """Call Claude Vision with the frame and creative mode prompt."""
+    def _generate_narration(self, frame_b64: str | None, mode: str, obj_name: str = "") -> str:
+        """Call Claude with an image frame or demo context, and return narration text."""
         system_prompt = SYSTEM_PROMPT_ES if self.lang == "es" else SYSTEM_PROMPT_EN
         instruction = MODE_INSTRUCTIONS[mode]
 
-        message = {
-            "role": "user",
-            "content": [
+        if frame_b64:
+            content = [
                 {
                     "type": "image",
                     "source": {
@@ -157,13 +150,17 @@ class NarrateAgent(BaseAgent):
                         "data": frame_b64,
                     },
                 },
-                {
-                    "type": "text",
-                    "text": instruction,
-                },
-            ],
-        }
+                {"type": "text", "text": instruction},
+            ]
+        else:
+            enhanced = (
+                f"Context from demo: {self._current_demo_context}\n"
+                f"The child is looking at: {obj_name}\n\n"
+                f"{instruction}"
+            )
+            content = [{"type": "text", "text": enhanced}]
 
+        message = {"role": "user", "content": content}
         self.conversation_history.append(message)
         messages_to_send = self.conversation_history[-self.max_history:]
 
@@ -177,37 +174,23 @@ class NarrateAgent(BaseAgent):
             reply = response.content[0].text.strip()
             self.conversation_history.append({"role": "assistant", "content": reply})
 
-            # Trim history
             if len(self.conversation_history) > self.max_history + 2:
                 self.conversation_history = self.conversation_history[-self.max_history:]
 
             return reply
         except Exception as e:
             print(f"[{self.AGENT_NAME}] Claude error: {e}")
-            return "Wow, that looks really interesting! Tell me more about what you see!"
+            self.conversation_history.pop()  # remove orphaned user message
+            fallback_obj = obj_name or "that"
+            return f"Wow, look at {fallback_obj}! Tell me more about what you see!"
 
     def _speak(self, text: str):
-        """Print and optionally speak the narration."""
+        """Print and speak the narration (no-op if gTTS unavailable)."""
         print(f"\n{'─' * 60}")
         print(f"  Reachy says:")
         print(f"  {text}")
         print(f"{'─' * 60}\n")
-
-        if not VOICE_AVAILABLE:
-            return
-
-        try:
-            tts = gTTS(text=text, lang=self.lang)
-            with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f:
-                tts.save(f.name)
-                # macOS: afplay, Linux: mpv or aplay
-                if sys.platform == "darwin":
-                    subprocess.run(["afplay", f.name], check=True)
-                else:
-                    subprocess.run(["mpv", "--no-video", f.name], check=True)
-                os.unlink(f.name)
-        except Exception as e:
-            print(f"[{self.AGENT_NAME}] TTS error: {e}")
+        speak_tts(text, lang=self.lang)
 
 
 if __name__ == "__main__":

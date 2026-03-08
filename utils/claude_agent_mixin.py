@@ -55,6 +55,7 @@ class ClaudeAgentMixin:
             "interaction_count": 0,
             "session_start": datetime.now(timezone.utc).isoformat(),
         }
+        self._demo_hints: str | None = None
 
         api_key = os.environ.get("ANTHROPIC_API_KEY", "")
         if not api_key or not _CLAUDE_AVAILABLE:
@@ -65,6 +66,10 @@ class ClaudeAgentMixin:
         self._claude = Anthropic(api_key=api_key)
         agent_name = getattr(self, "AGENT_NAME", "agent")
         print(f"[{agent_name}] Claude ready (model: {model})")
+
+    def set_demo_hints(self, hints: str | None):
+        """Store a demo context hint. Injected into system prompt on next call."""
+        self._demo_hints = hints
 
     def build_system_prompt(self) -> str:
         """Compose the full system prompt from identity + behaviors + session + format."""
@@ -89,6 +94,12 @@ class ClaudeAgentMixin:
             f"- Interaction count: {ctx['interaction_count']}\n"
             f"- Objects seen: {seen}"
         )
+
+        # Demo context hints (if active)
+        if self._demo_hints:
+            sections.append(
+                f"DEMO CONTEXT (use this to inform your response):\n{self._demo_hints}"
+            )
 
         # Output format
         sections.append(

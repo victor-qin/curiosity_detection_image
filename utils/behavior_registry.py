@@ -66,6 +66,17 @@ ROVER_BEHAVIORS = {
             {"left": 0.0, "right": 0.0, "duration_ms": 100},
         ],
     },
+    "speak_and_drive": {
+        "description": "Say a short excited phrase to the child AND drive toward something. Use when another agent (like Butterfly) discovered something new. (requires direction, narration)",
+        "requires": ["direction", "narration"],
+        "motor_map": {
+            "left":   {"left": 0.3, "right": 0.7, "duration_ms": 800},
+            "right":  {"left": 0.7, "right": 0.3, "duration_ms": 800},
+            "center": {"left": 0.5, "right": 0.5, "duration_ms": 1000},
+            "up":     {"left": 0.5, "right": 0.5, "duration_ms": 600},
+            "down":   {"left": 0.4, "right": 0.4, "duration_ms": 500},
+        },
+    },
     "idle": {
         "description": "Stay still and wait",
         "motor_map": {"left": 0.0, "right": 0.0, "duration_ms": 0},
