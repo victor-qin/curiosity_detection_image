@@ -46,6 +46,7 @@ class InterestDetector:
         self._ref_hash = None       # EMA-blended reference (numpy float vector)
         self._focus_start = None     # timestamp when sustained focus began
         self._last_md5 = None        # fallback: MD5 of raw bytes
+        self._triggered = False      # True after focus event consumed; rearms on look-away
 
     def _compute_hash(self, frame_bytes: bytes) -> np.ndarray | None:
         """Convert JPEG bytes to a flat grayscale float vector."""
@@ -130,19 +131,24 @@ class InterestDetector:
             if self._focus_start is None:
                 self._focus_start = timestamp
             duration = timestamp - self._focus_start
+            is_focused = duration >= self.interest_time and not self._triggered
+            if is_focused:
+                self._triggered = True  # consumed — rearms on look-away
             return {
-                "focused": duration >= self.interest_time,
+                "focused": is_focused,
                 "duration": duration,
                 "similarity": sim,
             }
         else:
-            # Looked away — reset
+            # Looked away — reset reference and rearm trigger
             self._ref_hash = current_hash
             self._focus_start = timestamp
+            self._triggered = False
             return {"focused": False, "duration": 0.0, "similarity": sim}
 
     def reset(self):
-        """Call after triggering to prevent immediate re-trigger."""
+        """Clear all state. Use on scene changes to rearm detection."""
         self._ref_hash = None
         self._focus_start = None
         self._last_md5 = None
+        self._triggered = False

@@ -26,6 +26,7 @@ class BaseAgent:
             mqtt_port=self.args.mqtt_port,
         )
         self._interaction_count = 0
+        self._current_demo_context: str | None = None
 
     def _parse_args(self):
         parser = argparse.ArgumentParser(
@@ -81,15 +82,28 @@ class BaseAgent:
         data["timestamp"] = datetime.now(timezone.utc).isoformat()
         self.bus.publish(f"reachy/events/{self.AGENT_NAME}", data)
 
+    def handle_context(self, payload: dict):
+        """Handle demo context hints from the core loop."""
+        hints = payload.get("hints", {})
+        self._current_demo_context = hints.get(self.AGENT_NAME)
+        if hasattr(self, "set_demo_hints"):
+            self.set_demo_hints(self._current_demo_context)
+        if self._current_demo_context:
+            print(f"[{self.AGENT_NAME}] Demo hint: {self._current_demo_context[:80]}...")
+
     def _route_message(self, topic: str, payload: dict):
         """Route incoming messages to the appropriate handler."""
         if topic == "reachy/commands/goto":
             self._interaction_count += 1
+            source = payload.get("source", "")
+            source_tag = f" (from {source})" if source and source != "child-camera" else ""
             print(
                 f"[{self.AGENT_NAME}] GOTO #{payload.get('interaction_id', '?')}: "
-                f"{payload.get('object', 'unknown')}"
+                f"{payload.get('object', 'unknown')}{source_tag}"
             )
             self.handle_goto(payload)
+        elif topic == "reachy/commands/context":
+            self.handle_context(payload)
         elif topic == "reachy/commands/system":
             self.handle_system(payload)
 
@@ -107,6 +121,7 @@ class BaseAgent:
             print(f"[{self.AGENT_NAME}] WARNING: No MQTT broker and no --http-port. No messages will be received.")
 
         self.bus.subscribe("reachy/commands/goto", self._route_message)
+        self.bus.subscribe("reachy/commands/context", self._route_message)
         self.bus.subscribe("reachy/commands/system", self._route_message)
         self.on_start()
 

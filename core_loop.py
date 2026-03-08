@@ -171,6 +171,44 @@ def analyze_scene(claude, frame_bytes: bytes) -> dict | None:
         return None
 
 
+# ─── Interest Memory ────────────────────────────────────────────────────────
+
+
+class InterestMemory:
+    """Sliding window memory of recently-triggered objects.
+    Replaces the fixed cooldown timer with semantic deduplication."""
+
+    def __init__(self, window_seconds: float = 60.0):
+        self._recent: list[tuple[str, str, float]] = []  # (object, source, timestamp)
+        self._window = window_seconds
+
+    def has_seen(self, object_name: str, source: str = "child-camera") -> bool:
+        self._prune()
+        return any(
+            obj.lower() == object_name.lower() and src == source
+            for obj, src, _ in self._recent
+        )
+
+    def record(self, object_name: str, source: str = "child-camera"):
+        self._prune()
+        self._recent.append((object_name, source, time.time()))
+
+    def recent_objects(self) -> list[str]:
+        self._prune()
+        seen_lower: set[str] = set()
+        seen: list[str] = []
+        for obj, _, _ in self._recent:
+            key = obj.lower()
+            if key not in seen_lower:
+                seen_lower.add(key)
+                seen.append(obj)
+        return seen
+
+    def _prune(self):
+        cutoff = time.time() - self._window
+        self._recent = [(o, s, t) for o, s, t in self._recent if t > cutoff]
+
+
 # ─── Main ────────────────────────────────────────────────────────────────────
 
 
@@ -207,10 +245,6 @@ def main():
         help="Frame similarity threshold (default: 0.85)"
     )
     parser.add_argument(
-        "--cooldown", type=float, default=8.0,
-        help="Seconds to wait after triggering before re-detecting (default: 8.0)"
-    )
-    parser.add_argument(
         "--http-agents", nargs="*", default=[],
         help="HTTP fallback agent endpoints (e.g. http://localhost:8001)"
     )
@@ -218,21 +252,40 @@ def main():
         "--frame-interval", type=float, default=0.5,
         help="Seconds between frame captures (default: 0.5 = 2 FPS)"
     )
+    parser.add_argument(
+        "--demo-script", type=str, default=None,
+        help="Path to demo script JSON (choreographed demo mode)"
+    )
+    parser.add_argument(
+        "--memory-window", type=float, default=60.0,
+        help="Seconds to remember seen objects (default: 60)"
+    )
     args = parser.parse_args()
+
+    # ── Load demo script (if provided) ───────────────────────────────────────
+
+    demo_mgr = None
+    if args.demo_script:
+        from utils.demo_script import DemoScriptManager
+        demo_mgr = DemoScriptManager(args.demo_script)
 
     # ── Check prerequisites ──────────────────────────────────────────────────
 
     api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-    if not api_key:
-        print("ANTHROPIC_API_KEY not set.")
-        print("  export ANTHROPIC_API_KEY='sk-ant-...'")
-        sys.exit(1)
+    claude = None
 
-    if not CLAUDE_AVAILABLE:
-        print("anthropic not installed: pip install anthropic")
-        sys.exit(1)
-
-    claude = Anthropic(api_key=api_key)
+    if api_key and CLAUDE_AVAILABLE:
+        claude = Anthropic(api_key=api_key)
+    elif demo_mgr:
+        print("No API key — using demo script metadata only (no Claude Vision)")
+    else:
+        if not api_key:
+            print("ANTHROPIC_API_KEY not set.")
+            print("  export ANTHROPIC_API_KEY='sk-ant-...'")
+            sys.exit(1)
+        if not CLAUDE_AVAILABLE:
+            print("anthropic not installed: pip install anthropic")
+            sys.exit(1)
 
     # ── Setup image source ───────────────────────────────────────────────────
 
@@ -280,86 +333,158 @@ def main():
 
     # ── Banner ───────────────────────────────────────────────────────────────
 
+    source_label = "Static image" if args.image else ("Webcam (demo)" if args.demo else f"Mentra bridge ({args.bridge})")
     print("\n" + "=" * 60)
     print("  REACHY MINI — CORE PERCEPTION LOOP")
     print("=" * 60)
-    print(f"  Source:      {'Webcam (demo)' if args.demo else f'Mentra bridge ({args.bridge})'}")
+    print(f"  Source:      {source_label}")
     print(f"  Model:       {CLAUDE_MODEL}")
     print(f"  Focus time:  {args.interest_time}s")
     print(f"  Similarity:  {args.similarity}")
-    print(f"  Cooldown:    {args.cooldown}s")
+    print(f"  Memory:      {args.memory_window}s window")
     print(f"  Transport:   {'MQTT' if mqtt_ok else 'HTTP fallback'}")
     print(f"  Frame rate:  {1/args.frame_interval:.1f} FPS")
+    if demo_mgr:
+        print(f"  Demo script: {args.demo_script}")
     print("=" * 60 + "\n")
     print("Watching... (Ctrl+C to stop)\n")
 
     # ── Main loop ────────────────────────────────────────────────────────────
 
     interaction_id = 0
-    cooldown_until = 0.0
+    memory = InterestMemory(args.memory_window)
+
+    if demo_mgr:
+        demo_mgr.start()
 
     try:
         while True:
             now = time.time()
 
-            # Cooldown check
-            if now < cooldown_until:
-                time.sleep(args.frame_interval)
-                continue
+            # ── Check demo completion ─────────────────────────────────────
+            if demo_mgr and demo_mgr.is_finished():
+                print("\n[DEMO] Script complete.")
+                break
 
-            # Capture frame
+            if demo_mgr and demo_mgr.did_loop:
+                demo_mgr.did_loop = False
+                memory = InterestMemory(args.memory_window)
+                detector.reset()
+                print("  [DEMO] Memory cleared for loop restart")
+
+            # ── PHASE 1: Scene changes → publish context hints ────────────
+            if demo_mgr:
+                changed, scene = demo_mgr.check_scene_change()
+                if changed and scene:
+                    detector.reset()  # rearm interest detection for new scene
+                    hints = demo_mgr.get_agent_hints(scene)
+                    if hints:
+                        bus.publish("reachy/commands/context", {
+                            "type": "context",
+                            "scene_id": scene["id"],
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                            "hints": hints,
+                        })
+                    print(
+                        f"  [DEMO] Scene → '{scene['id']}' "
+                        f"({scene['metadata'].get('object', '?')}) — context hints published"
+                    )
+
+            # ── PHASE 2: Scheduled discoveries → source-tagged GOTOs ─────
+            if demo_mgr:
+                for disc in demo_mgr.get_pending_discoveries():
+                    source = disc.get("source_agent", "butterfly-agent")
+                    obj = disc.get("object", "unknown")
+                    if memory.has_seen(obj, source):
+                        continue
+                    interaction_id += 1
+                    print(
+                        f"\n[{datetime.now().strftime('%H:%M:%S')}] "
+                        f"DISCOVERY #{interaction_id} from {source}: {obj}"
+                    )
+                    bus.publish("reachy/commands/goto", {
+                        "type": "goto",
+                        "interaction_id": interaction_id,
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "object": obj,
+                        "description": disc.get("description", ""),
+                        "location_hint": disc.get("location_hint", "center"),
+                        "category": disc.get("category", "discovery"),
+                        "suggested_actions": disc.get("suggested_actions", []),
+                        "focus_duration": 0.0,
+                        "source": source,
+                        "frame_b64": "",
+                        "recent_objects": memory.recent_objects(),
+                    })
+                    memory.record(obj, source)
+                    print("  => Discovery GOTO published")
+
+            # ── PHASE 3: Normal camera interest detection ─────────────────
             frame_bytes = get_photo()
             if frame_bytes is None:
                 time.sleep(args.frame_interval)
                 continue
 
-            # Check for sustained focus
             result = detector.update(frame_bytes, now)
 
             if result["focused"]:
-                interaction_id += 1
                 focus_duration = result["duration"]
 
                 print(
-                    f"[{datetime.now().strftime('%H:%M:%S')}] "
-                    f"INTEREST #{interaction_id} detected "
+                    f"\n[{datetime.now().strftime('%H:%M:%S')}] "
+                    f"INTEREST detected "
                     f"(focused {focus_duration:.1f}s, similarity {result['similarity']:.2f})"
                 )
 
-                # Analyze with Claude Vision
-                print("  Analyzing scene with Claude...")
-                scene = analyze_scene(claude, frame_bytes)
+                # Identify what we're looking at
+                if demo_mgr:
+                    active = demo_mgr.get_active_scene()
+                    if active:
+                        scene_data = demo_mgr.get_metadata_for_trigger(active)
+                        print(f"  [DEMO] Using scripted metadata: {scene_data.get('object', '?')}")
+                    elif claude:
+                        print("  Analyzing scene with Claude...")
+                        scene_data = analyze_scene(claude, frame_bytes)
+                    else:
+                        scene_data = None
+                else:
+                    print("  Analyzing scene with Claude...")
+                    scene_data = analyze_scene(claude, frame_bytes)
 
-                if scene:
-                    # Build and publish GOTO command
-                    frame_b64 = base64.standard_b64encode(frame_bytes).decode("utf-8")
-                    goto_cmd = {
-                        "type": "goto",
-                        "interaction_id": interaction_id,
-                        "timestamp": datetime.now(timezone.utc).isoformat(),
-                        "object": scene.get("object", "unknown"),
-                        "description": scene.get("description", ""),
-                        "location_hint": scene.get("location_hint", "center"),
-                        "category": scene.get("category", "other"),
-                        "suggested_actions": scene.get("suggested_actions", []),
-                        "focus_duration": round(focus_duration, 1),
-                        "frame_b64": frame_b64,
-                    }
+                if scene_data:
+                    obj_name = scene_data.get("object", "unknown")
 
-                    print(
-                        f"  => {scene.get('object', '?')} "
-                        f"({scene.get('category', '?')}, {scene.get('location_hint', '?')})"
-                    )
-                    print(f"  => {scene.get('description', '')}")
+                    if memory.has_seen(obj_name, "child-camera"):
+                        print(f"  => Already seen '{obj_name}' recently, skipping")
+                    else:
+                        interaction_id += 1
+                        frame_b64 = base64.standard_b64encode(frame_bytes).decode("utf-8")
+                        goto_cmd = {
+                            "type": "goto",
+                            "interaction_id": interaction_id,
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                            "object": obj_name,
+                            "description": scene_data.get("description", ""),
+                            "location_hint": scene_data.get("location_hint", "center"),
+                            "category": scene_data.get("category", "other"),
+                            "suggested_actions": scene_data.get("suggested_actions", []),
+                            "focus_duration": round(focus_duration, 1),
+                            "source": "child-camera",
+                            "frame_b64": frame_b64,
+                            "recent_objects": memory.recent_objects(),
+                        }
 
-                    bus.publish("reachy/commands/goto", goto_cmd)
-                    print("  => GOTO command published")
+                        print(
+                            f"  => {obj_name} "
+                            f"({scene_data.get('category', '?')}, {scene_data.get('location_hint', '?')})"
+                        )
+                        print(f"  => {scene_data.get('description', '')}")
+
+                        bus.publish("reachy/commands/goto", goto_cmd)
+                        memory.record(obj_name, "child-camera")
+                        print(f"  => GOTO #{interaction_id} published")
                 else:
                     print("  => Scene analysis failed, skipping")
-
-                # Enter cooldown
-                detector.reset()
-                cooldown_until = time.time() + args.cooldown
 
             time.sleep(args.frame_interval)
 
