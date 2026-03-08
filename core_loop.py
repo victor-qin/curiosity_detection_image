@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 """
-Core Perception Loop — grabs frames from Mentra bridge or webcam,
-detects sustained focus via perceptual hashing, calls Claude Vision
-for structured scene analysis, and publishes GOTO commands over MQTT.
+Core Perception Loop — grabs frames from Mentra bridge, webcam, or static
+image; detects sustained focus via perceptual hashing; identifies scenes via
+Claude Vision or demo script metadata; and publishes GOTO and context commands
+over MQTT. Supports choreographed demo mode with timed scenes and discoveries.
 """
 
 import argparse
@@ -176,7 +177,7 @@ def analyze_scene(claude, frame_bytes: bytes) -> dict | None:
 
 class InterestMemory:
     """Sliding window memory of recently-triggered objects.
-    Replaces the fixed cooldown timer with semantic deduplication."""
+    Replaces the fixed cooldown timer with name-based deduplication."""
 
     def __init__(self, window_seconds: float = 60.0):
         self._recent: list[tuple[str, str, float]] = []  # (object, source, timestamp)
@@ -267,7 +268,11 @@ def main():
     demo_mgr = None
     if args.demo_script:
         from utils.demo_script import DemoScriptManager
-        demo_mgr = DemoScriptManager(args.demo_script)
+        try:
+            demo_mgr = DemoScriptManager(args.demo_script)
+        except (FileNotFoundError, json.JSONDecodeError, ValueError) as e:
+            print(f"Failed to load demo script '{args.demo_script}': {e}")
+            sys.exit(1)
 
     # ── Check prerequisites ──────────────────────────────────────────────────
 
@@ -448,8 +453,11 @@ def main():
                     else:
                         scene_data = None
                 else:
-                    print("  Analyzing scene with Claude...")
-                    scene_data = analyze_scene(claude, frame_bytes)
+                    if claude:
+                        print("  Analyzing scene with Claude...")
+                        scene_data = analyze_scene(claude, frame_bytes)
+                    else:
+                        scene_data = None
 
                 if scene_data:
                     obj_name = scene_data.get("object", "unknown")

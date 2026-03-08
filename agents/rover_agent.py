@@ -27,7 +27,7 @@ try:
 except ImportError:
     REQUESTS_AVAILABLE = False
 
-# Deterministic fallback (same as nav_agent.py)
+# Deterministic fallback: (left_speed, right_speed, duration_ms) per direction
 STEERING_MAP = {
     "left":   (0.3, 0.7, 800),
     "right":  (0.7, 0.3, 800),
@@ -87,6 +87,8 @@ you only move physically. Use "speak_and_drive" only for discoveries from other 
     def _process_goto(self, payload: dict):
         try:
             self._do_goto(payload)
+        except Exception as e:
+            print(f"[{self.AGENT_NAME}] GOTO processing failed: {e}")
         finally:
             self._processing.release()
 
@@ -160,7 +162,9 @@ you only move physically. Use "speak_and_drive" only for discoveries from other 
                 time.sleep(cmd["duration_ms"] / 1000.0)
         elif "motor_map" in behavior_def:
             motor_map = behavior_def["motor_map"]
-            if isinstance(next(iter(motor_map.values())), dict):
+            if not motor_map:
+                print(f"[{self.AGENT_NAME}] Behavior '{behavior}' has empty motor_map, skipping")
+            elif isinstance(next(iter(motor_map.values())), dict):
                 # Direction-keyed motor map (values are dicts like {"left": 0.3, ...})
                 cmd = motor_map.get(direction, motor_map.get("center", {"left": 0.5, "right": 0.5, "duration_ms": 800}))
                 self._send_motor_command(cmd, obj_name)
@@ -215,7 +219,7 @@ you only move physically. Use "speak_and_drive" only for discoveries from other 
 
 
     def _speak(self, text: str):
-        """Print and optionally speak a short phrase."""
+        """Print and speak a short phrase (no-op if gTTS unavailable)."""
         print(f"[{self.AGENT_NAME}] Says: \"{text}\"")
         speak_tts(text, lang="en")
 

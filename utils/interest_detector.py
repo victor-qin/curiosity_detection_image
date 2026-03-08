@@ -105,13 +105,17 @@ class InterestDetector:
                 if self._focus_start is None:
                     self._focus_start = timestamp
                 duration = timestamp - self._focus_start
+                is_focused = duration >= self.interest_time and not self._triggered
+                if is_focused:
+                    self._triggered = True
                 return {
-                    "focused": duration >= self.interest_time,
+                    "focused": is_focused,
                     "duration": duration,
-                    "similarity": 1.0 if same else 0.0,
+                    "similarity": 1.0,
                 }
             else:
                 self._focus_start = None
+                self._triggered = False
                 return {"focused": False, "duration": 0.0, "similarity": 0.0}
 
         # First frame: initialize reference

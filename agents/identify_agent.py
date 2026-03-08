@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 """
-Narrate Agent — receives GOTO commands, calls Claude Vision with the
-frame in a creative mode (WONDER/STORY/CHALLENGE cycling), and speaks
-the response aloud via gTTS.
+Narrate Agent — receives GOTO commands, calls Claude with an image frame
+or demo context in a creative mode (WONDER/STORY/CHALLENGE cycling),
+and speaks the response aloud via the shared TTS helper.
 """
 
 import os
@@ -180,11 +180,12 @@ class NarrateAgent(BaseAgent):
             return reply
         except Exception as e:
             print(f"[{self.AGENT_NAME}] Claude error: {e}")
+            self.conversation_history.pop()  # remove orphaned user message
             fallback_obj = obj_name or "that"
             return f"Wow, look at {fallback_obj}! Tell me more about what you see!"
 
     def _speak(self, text: str):
-        """Print and optionally speak the narration."""
+        """Print and speak the narration (no-op if gTTS unavailable)."""
         print(f"\n{'─' * 60}")
         print(f"  Reachy says:")
         print(f"  {text}")
